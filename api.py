@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import time
 import random
+import logging
 from typing import Optional
 from diffusers.utils import export_to_video
 import base64
@@ -14,7 +16,20 @@ from skyreelsinfer.offload import OffloadConfig
 from skyreelsinfer.skyreels_video_infer import SkyReelsVideoInfer
 import socket
 
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="SkyReels Video Generation API")
+
+# Configuration CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Autorise toutes les origines
+    allow_credentials=True,
+    allow_methods=["*"],  # Autorise toutes les méthodes
+    allow_headers=["*"],  # Autorise tous les headers
+)
 
 # Fonction pour obtenir l'adresse IP locale
 def get_local_ip():
@@ -36,7 +51,7 @@ class VideoGenerationRequest(BaseModel):
     num_frames: int = 97
     prompt: str
     embedded_guidance_scale: float = 1.0
-    negative_prompt: Optional[str] = None
+    negative_prompt: str = "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion"
     num_inference_steps: int = 30
     seed: int = -1
     fps: int = 24
@@ -51,6 +66,7 @@ class VideoGenerationRequest(BaseModel):
 @app.post("/generate-video")
 async def generate_video(request: VideoGenerationRequest):
     try:
+        logger.info(f"Received video generation request with task_type: {request.task_type}")
         out_dir = "results/api_outputs"
         os.makedirs(out_dir, exist_ok=True)
 
@@ -58,16 +74,21 @@ async def generate_video(request: VideoGenerationRequest):
         image = None
         if request.task_type == "i2v" and request.image_base64:
             try:
+                logger.info("Processing i2v request with image")
                 # Décoder l'image base64
                 image_data = base64.b64decode(request.image_base64)
                 image = Image.open(BytesIO(image_data))
+                logger.info(f"Image successfully decoded, size: {image.size}")
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Erreur lors du décodage de l'image: {str(e)}")
+                logger.error(f"Error processing image: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
         
         if request.seed == -1:
             random.seed(time.time())
             request.seed = int(random.randrange(4294967294))
+            logger.info(f"Generated random seed: {request.seed}")
 
+        logger.info("Initializing SkyReelsVideoInfer")
         predictor = SkyReelsVideoInfer(
             task_type=TaskType.I2V if request.task_type == "i2v" else TaskType.T2V,
             model_id=request.model_id,
@@ -82,8 +103,12 @@ async def generate_video(request: VideoGenerationRequest):
             enable_cfg_parallel=request.guidance_scale > 1.0 and not request.sequence_batch,
         )
 
+        # S'assurer que le prompt et le negative_prompt sont des chaînes de caractères
+        prompt = str(request.prompt)
+        negative_prompt = str(request.negative_prompt)
+
         kwargs = {
-            "prompt": request.prompt,
+            "prompt": prompt,
             "height": request.height,
             "width": request.width,
             "num_frames": request.num_frames,
@@ -91,17 +116,19 @@ async def generate_video(request: VideoGenerationRequest):
             "seed": request.seed,
             "guidance_scale": request.guidance_scale,
             "embedded_guidance_scale": request.embedded_guidance_scale,
-            "negative_prompt": request.negative_prompt,
+            "negative_prompt": negative_prompt,
             "cfg_for": request.sequence_batch,
         }
 
         if request.task_type == "i2v" and image:
             kwargs["image"] = image
 
+        logger.info("Starting video generation")
         output = predictor.inference(kwargs)
-        video_out_file = f"{request.prompt[:100].replace('/','')}_{request.seed}.mp4"
+        video_out_file = f"{prompt[:100].replace('/','')}_{request.seed}.mp4"
         video_path = f"{out_dir}/{video_out_file}"
         export_to_video(output, video_path, fps=request.fps)
+        logger.info(f"Video generated successfully: {video_path}")
 
         return FileResponse(
             video_path,
@@ -111,6 +138,7 @@ async def generate_video(request: VideoGenerationRequest):
         )
 
     except Exception as e:
+        logger.error(f"Error during video generation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def print_api_info():
@@ -150,4 +178,4 @@ def print_api_info():
 if __name__ == "__main__":
     import uvicorn
     print_api_info()
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8080, access_log=True) 
