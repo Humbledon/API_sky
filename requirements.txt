@@ -14,3 +14,7 @@ imageio-ffmpeg==0.5.1
 nvtx==0.2.10
 opencv-python==4.10.0.84
 imageio==2.36.1
+fastapi==0.110.0
+uvicorn==0.27.1
+python-multipart==0.0.9
+pydantic==2.6.3
